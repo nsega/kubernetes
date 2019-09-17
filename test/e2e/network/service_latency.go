@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -34,7 +34,7 @@ import (
 	testutils "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
-	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo"
 )
 
 type durations []time.Duration
@@ -128,13 +128,12 @@ var _ = SIGDescribe("Service endpoints latency", func() {
 
 func runServiceLatencies(f *framework.Framework, inParallel, total int, acceptableFailureRatio float32) (output []time.Duration, err error) {
 	cfg := testutils.RCConfig{
-		Client:         f.ClientSet,
-		InternalClient: f.InternalClientset,
-		Image:          imageutils.GetPauseImageName(),
-		Name:           "svc-latency-rc",
-		Namespace:      f.Namespace.Name,
-		Replicas:       1,
-		PollInterval:   time.Second,
+		Client:       f.ClientSet,
+		Image:        imageutils.GetPauseImageName(),
+		Name:         "svc-latency-rc",
+		Namespace:    f.Namespace.Name,
+		Replicas:     1,
+		PollInterval: time.Second,
 	}
 	if err := framework.RunRC(cfg); err != nil {
 		return nil, err
@@ -161,7 +160,7 @@ func runServiceLatencies(f *framework.Framework, inParallel, total int, acceptab
 	blocker := make(chan struct{}, inParallel)
 	for i := 0; i < total; i++ {
 		go func() {
-			defer GinkgoRecover()
+			defer ginkgo.GinkgoRecover()
 			blocker <- struct{}{}
 			defer func() { <-blocker }()
 			if d, err := singleServiceLatency(f, cfg.Name, endpointQueries); err != nil {
@@ -177,7 +176,7 @@ func runServiceLatencies(f *framework.Framework, inParallel, total int, acceptab
 		select {
 		case e := <-errs:
 			framework.Logf("Got error: %v", e)
-			errCount += 1
+			errCount++
 		case d := <-durations:
 			output = append(output, d)
 		}

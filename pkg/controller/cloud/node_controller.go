@@ -57,29 +57,22 @@ type CloudNodeController struct {
 	nodeStatusUpdateFrequency time.Duration
 }
 
-const (
-	// nodeStatusUpdateRetry controls the number of retries of writing NodeStatus update.
-	nodeStatusUpdateRetry = 5
-
-	// The amount of time the nodecontroller should sleep between retrying NodeStatus updates
-	retrySleepTime = 20 * time.Millisecond
-)
-
 // NewCloudNodeController creates a CloudNodeController object
 func NewCloudNodeController(
 	nodeInformer coreinformers.NodeInformer,
 	kubeClient clientset.Interface,
 	cloud cloudprovider.Interface,
-	nodeStatusUpdateFrequency time.Duration) *CloudNodeController {
+	nodeStatusUpdateFrequency time.Duration) (*CloudNodeController, error) {
 
 	eventBroadcaster := record.NewBroadcaster()
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "cloud-node-controller"})
 	eventBroadcaster.StartLogging(klog.Infof)
-	if kubeClient != nil {
-		klog.V(0).Infof("Sending events to api server.")
-		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
-	} else {
-		klog.V(0).Infof("No api server defined - no events will be sent to API server.")
+
+	klog.Infof("Sending events to api server.")
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+
+	if _, ok := cloud.Instances(); !ok {
+		return nil, errors.New("cloud provider does not support instances")
 	}
 
 	cnc := &CloudNodeController{
@@ -97,7 +90,7 @@ func NewCloudNodeController(
 		UpdateFunc: cnc.UpdateCloudNode,
 	})
 
-	return cnc
+	return cnc, nil
 }
 
 // This controller updates newly registered nodes with information
@@ -186,11 +179,11 @@ func (cnc *CloudNodeController) updateNodeAddress(node *v1.Node, instances cloud
 			return
 		}
 	}
-	newNode := node.DeepCopy()
-	newNode.Status.Addresses = nodeAddresses
-	if !nodeAddressesChangeDetected(node.Status.Addresses, newNode.Status.Addresses) {
+	if !nodeAddressesChangeDetected(node.Status.Addresses, nodeAddresses) {
 		return
 	}
+	newNode := node.DeepCopy()
+	newNode.Status.Addresses = nodeAddresses
 	_, _, err = nodeutil.PatchNodeStatus(cnc.kubeClient.CoreV1(), types.NodeName(node.Name), node, newNode)
 	if err != nil {
 		klog.Errorf("Error patching node with cloud ip addresses = [%v]", err)
@@ -256,6 +249,13 @@ func (cnc *CloudNodeController) initializeNode(node *v1.Node) {
 			return err
 		}
 
+		cloudTaint := getCloudTaint(curNode.Spec.Taints)
+		if cloudTaint == nil {
+			// Node object received from event had the cloud taint but was outdated,
+			// the node has actually already been initialized.
+			return nil
+		}
+
 		if curNode.Spec.ProviderID == "" {
 			providerID, err := cloudprovider.GetInstanceProviderID(context.TODO(), cnc.cloud, types.NodeName(curNode.Name))
 			if err == nil {
@@ -312,14 +312,14 @@ func (cnc *CloudNodeController) initializeNode(node *v1.Node) {
 		// After adding, call UpdateNodeAddress to set the CloudProvider provided IPAddresses
 		// So that users do not see any significant delay in IP addresses being filled into the node
 		cnc.updateNodeAddress(curNode, instances)
+
+		klog.Infof("Successfully initialized node %s with cloud provider", node.Name)
 		return nil
 	})
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
 	}
-
-	klog.Infof("Successfully initialized node %s with cloud provider", node.Name)
 }
 
 func getCloudTaint(taints []v1.Taint) *v1.Taint {
@@ -382,15 +382,13 @@ func nodeAddressesChangeDetected(addressSet1, addressSet2 []v1.NodeAddress) bool
 		return true
 	}
 	addressMap1 := map[v1.NodeAddressType]string{}
-	addressMap2 := map[v1.NodeAddressType]string{}
 
 	for i := range addressSet1 {
 		addressMap1[addressSet1[i].Type] = addressSet1[i].Address
-		addressMap2[addressSet2[i].Type] = addressSet2[i].Address
 	}
 
-	for k, v := range addressMap1 {
-		if addressMap2[k] != v {
+	for _, v := range addressSet2 {
+		if addressMap1[v.Type] != v.Address {
 			return true
 		}
 	}

@@ -39,7 +39,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/runtime/serializer/streaming"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/watch"
@@ -55,9 +54,8 @@ import (
 )
 
 var (
-	corev1GV     = schema.GroupVersion{Version: "v1"}
-	corev1Codec  = scheme.Codecs.CodecForVersions(scheme.Codecs.LegacyCodec(corev1GV), scheme.Codecs.UniversalDecoder(corev1GV), corev1GV, corev1GV)
-	metaAccessor = meta.NewAccessor()
+	corev1GV    = schema.GroupVersion{Version: "v1"}
+	corev1Codec = scheme.Codecs.CodecForVersions(scheme.Codecs.LegacyCodec(corev1GV), scheme.Codecs.UniversalDecoder(corev1GV), corev1GV, corev1GV)
 )
 
 func stringBody(body string) io.ReadCloser {
@@ -84,7 +82,7 @@ func fakeClientWith(testName string, t *testing.T, data map[string]string) FakeC
 	return func(version schema.GroupVersion) (RESTClient, error) {
 		return &fake.RESTClient{
 			GroupVersion:         corev1GV,
-			NegotiatedSerializer: serializer.DirectCodecFactory{CodecFactory: scheme.Codecs},
+			NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
 			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 				p := req.URL.Path
 				q := req.URL.RawQuery

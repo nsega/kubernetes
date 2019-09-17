@@ -1,3 +1,5 @@
+// +build !providerless
+
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -19,18 +21,18 @@ package cinder
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utiltesting "k8s.io/client-go/util/testing"
-	"k8s.io/kubernetes/pkg/cloudprovider/providers/openstack"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 	"k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/legacy-cloud-providers/openstack"
 )
 
 func TestCanSupport(t *testing.T) {
@@ -64,7 +66,7 @@ type fakePDManager struct {
 }
 
 func getFakeDeviceName(host volume.VolumeHost, pdName string) string {
-	return path.Join(host.GetPluginDir(cinderVolumePluginName), "device", pdName)
+	return filepath.Join(host.GetPluginDir(cinderVolumePluginName), "device", pdName)
 }
 
 // Real Cinder AttachDisk attaches a cinder volume. If it is not yet mounted,
@@ -160,13 +162,13 @@ func TestPlugin(t *testing.T) {
 	if mounter == nil {
 		t.Errorf("Got a nil Mounter")
 	}
-	volPath := path.Join(tmpDir, "pods/poduid/volumes/kubernetes.io~cinder/vol1")
+	volPath := filepath.Join(tmpDir, "pods/poduid/volumes/kubernetes.io~cinder/vol1")
 	path := mounter.GetPath()
 	if path != volPath {
 		t.Errorf("Got unexpected path: %s", path)
 	}
 
-	if err := mounter.SetUp(nil); err != nil {
+	if err := mounter.SetUp(volume.MounterArgs{}); err != nil {
 		t.Errorf("Expected success, got: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -200,6 +202,9 @@ func TestPlugin(t *testing.T) {
 		PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimDelete,
 	}
 	provisioner, err := plug.(*cinderPlugin).newProvisionerInternal(options, &fakePDManager{0})
+	if err != nil {
+		t.Errorf("ProvisionerInternal() failed: %v", err)
+	}
 	persistentSpec, err := provisioner.Provision(nil, nil)
 	if err != nil {
 		t.Errorf("Provision() failed: %v", err)
@@ -252,6 +257,9 @@ func TestPlugin(t *testing.T) {
 		PersistentVolume: persistentSpec,
 	}
 	deleter, err := plug.(*cinderPlugin).newDeleterInternal(volSpec, &fakePDManager{0})
+	if err != nil {
+		t.Errorf("DeleterInternal() failed: %v", err)
+	}
 	err = deleter.Delete()
 	if err != nil {
 		t.Errorf("Deleter() failed: %v", err)
@@ -304,17 +312,20 @@ func getOpenstackCloudProvider() (*openstack.OpenStack, error) {
 func getOpenstackConfig() openstack.Config {
 	cfg := openstack.Config{
 		Global: struct {
-			AuthURL    string `gcfg:"auth-url"`
-			Username   string
-			UserID     string `gcfg:"user-id"`
-			Password   string
-			TenantID   string `gcfg:"tenant-id"`
-			TenantName string `gcfg:"tenant-name"`
-			TrustID    string `gcfg:"trust-id"`
-			DomainID   string `gcfg:"domain-id"`
-			DomainName string `gcfg:"domain-name"`
-			Region     string
-			CAFile     string `gcfg:"ca-file"`
+			AuthURL         string `gcfg:"auth-url"`
+			Username        string
+			UserID          string `gcfg:"user-id"`
+			Password        string
+			TenantID        string `gcfg:"tenant-id"`
+			TenantName      string `gcfg:"tenant-name"`
+			TrustID         string `gcfg:"trust-id"`
+			DomainID        string `gcfg:"domain-id"`
+			DomainName      string `gcfg:"domain-name"`
+			Region          string
+			CAFile          string `gcfg:"ca-file"`
+			SecretName      string `gcfg:"secret-name"`
+			SecretNamespace string `gcfg:"secret-namespace"`
+			KubeconfigPath  string `gcfg:"kubeconfig-path"`
 		}{
 			Username:   "user",
 			Password:   "pass",
