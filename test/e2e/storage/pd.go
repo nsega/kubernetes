@@ -33,6 +33,7 @@ import (
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -40,7 +41,9 @@ import (
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	"k8s.io/kubernetes/test/e2e/framework/providers/gce"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 )
@@ -51,7 +54,6 @@ const (
 	nodeStatusTimeout   = 10 * time.Minute
 	nodeStatusPollTime  = 1 * time.Second
 	podEvictTimeout     = 2 * time.Minute
-	maxReadRetry        = 3
 	minNodes            = 2
 )
 
@@ -76,7 +78,9 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 
 		podClient = cs.CoreV1().Pods(ns)
 		nodeClient = cs.CoreV1().Nodes()
-		nodes = framework.GetReadySchedulableNodesOrDie(cs)
+		var err error
+		nodes, err = e2enode.GetReadySchedulableNodes(cs)
+		framework.ExpectNoError(err)
 		gomega.Expect(len(nodes.Items)).To(gomega.BeNumerically(">=", minNodes), fmt.Sprintf("Requires at least %d nodes", minNodes))
 		host0Name = types.NodeName(nodes.Items[0].ObjectMeta.Name)
 		host1Name = types.NodeName(nodes.Items[1].ObjectMeta.Name)
@@ -131,7 +135,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 				}
 
 				ginkgo.By("creating PD")
-				diskName, err := framework.CreatePDWithRetry()
+				diskName, err := e2epv.CreatePDWithRetry()
 				framework.ExpectNoError(err, "Error creating PD")
 
 				var fmtPod *v1.Pod
@@ -185,6 +189,8 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 					ginkgo.By("deleting host0Pod") // delete this pod before creating next pod
 					framework.ExpectNoError(podClient.Delete(host0Pod.Name, podDelOpt), "Failed to delete host0Pod")
 					framework.Logf("deleted host0Pod %q", host0Pod.Name)
+					e2epod.WaitForPodToDisappear(cs, host0Pod.Namespace, host0Pod.Name, labels.Everything(), framework.Poll, framework.PodDeleteTimeout)
+					framework.Logf("deleted host0Pod %q disappeared", host0Pod.Name)
 				}
 
 				ginkgo.By("creating host1Pod on node1")
@@ -249,7 +255,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 
 				ginkgo.By(fmt.Sprintf("creating %d PD(s)", numPDs))
 				for i := 0; i < numPDs; i++ {
-					name, err := framework.CreatePDWithRetry()
+					name, err := e2epv.CreatePDWithRetry()
 					framework.ExpectNoError(err, fmt.Sprintf("Error creating PD %d", i))
 					diskNames = append(diskNames, name)
 				}
@@ -336,7 +342,7 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 				origNodeCnt := len(nodes.Items) // healhy nodes running kubelet
 
 				ginkgo.By("creating a pd")
-				diskName, err := framework.CreatePDWithRetry()
+				diskName, err := e2epv.CreatePDWithRetry()
 				framework.ExpectNoError(err, "Error creating a pd")
 
 				targetNode := &nodes.Items[0] // for node delete ops
@@ -435,41 +441,27 @@ var _ = utils.SIGDescribe("Pod Disks", func() {
 		framework.SkipUnlessProviderIs("gce")
 
 		ginkgo.By("delete a PD")
-		framework.ExpectNoError(framework.DeletePDWithRetry("non-exist"))
+		framework.ExpectNoError(e2epv.DeletePDWithRetry("non-exist"))
 	})
 })
 
 func countReadyNodes(c clientset.Interface, hostName types.NodeName) int {
 	e2enode.WaitForNodeToBeReady(c, string(hostName), nodeStatusTimeout)
 	framework.WaitForAllNodesSchedulable(c, nodeStatusTimeout)
-	nodes := framework.GetReadySchedulableNodesOrDie(c)
+	nodes, err := e2enode.GetReadySchedulableNodes(c)
+	framework.ExpectNoError(err)
 	return len(nodes.Items)
 }
 
 func verifyPDContentsViaContainer(f *framework.Framework, podName, containerName string, fileAndContentToVerify map[string]string) {
 	for filePath, expectedContents := range fileAndContentToVerify {
-		var value string
-		// Add a retry to avoid temporal failure in reading the content
-		for i := 0; i < maxReadRetry; i++ {
-			v, err := f.ReadFileViaContainer(podName, containerName, filePath)
-			value = v
-			if err != nil {
-				framework.Logf("Error reading file: %v", err)
-			}
-			framework.ExpectNoError(err)
-			framework.Logf("Read file %q with content: %v (iteration %d)", filePath, v, i)
-			if strings.TrimSpace(v) != strings.TrimSpace(expectedContents) {
-				framework.Logf("Warning: read content <%q> does not match execpted content <%q>.", v, expectedContents)
-				size, err := f.CheckFileSizeViaContainer(podName, containerName, filePath)
-				if err != nil {
-					framework.Logf("Error checking file size: %v", err)
-				}
-				framework.Logf("Check file %q size: %q", filePath, size)
-			} else {
-				break
-			}
+		// No retry loop as there should not be temporal based failures
+		v, err := f.ReadFileViaContainer(podName, containerName, filePath)
+		framework.ExpectNoError(err, "Error reading file %s via container %s", filePath, containerName)
+		framework.Logf("Read file %q with content: %v", filePath, v)
+		if strings.TrimSpace(v) != strings.TrimSpace(expectedContents) {
+			framework.Failf("Read content <%q> does not match execpted content <%q>.", v, expectedContents)
 		}
-		framework.ExpectEqual(strings.TrimSpace(value), strings.TrimSpace(expectedContents))
 	}
 }
 
@@ -609,7 +601,7 @@ func detachAndDeletePDs(diskName string, hosts []types.NodeName) {
 		waitForPDDetach(diskName, host)
 	}
 	ginkgo.By(fmt.Sprintf("Deleting PD %q", diskName))
-	framework.ExpectNoError(framework.DeletePDWithRetry(diskName))
+	framework.ExpectNoError(e2epv.DeletePDWithRetry(diskName))
 }
 
 func waitForPDInVolumesInUse(

@@ -20,30 +20,38 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo"
+	"github.com/pkg/errors"
 
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	apierrors "k8s.io/apimachinery/pkg/util/errors"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
-	csilib "k8s.io/csi-translation-lib"
+	"k8s.io/component-base/metrics/testutil"
+	csitrans "k8s.io/csi-translation-lib"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/metrics"
 	"k8s.io/kubernetes/test/e2e/framework/podlogs"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	"k8s.io/kubernetes/test/e2e/framework/volume"
 	"k8s.io/kubernetes/test/e2e/storage/testpatterns"
 )
 
 var (
 	migratedPlugins *string
+	minValidSize    = "1Ki"
+	maxValidSize    = "10Ei"
 )
 
 func init() {
@@ -66,15 +74,16 @@ type TestSuite interface {
 
 // TestSuiteInfo represents a set of parameters for TestSuite
 type TestSuiteInfo struct {
-	name         string                     // name of the TestSuite
-	featureTag   string                     // featureTag for the TestSuite
-	testPatterns []testpatterns.TestPattern // Slice of TestPattern for the TestSuite
+	name               string                     // name of the TestSuite
+	featureTag         string                     // featureTag for the TestSuite
+	testPatterns       []testpatterns.TestPattern // Slice of TestPattern for the TestSuite
+	supportedSizeRange volume.SizeRange           // Size range supported by the test suite
 }
 
 // TestResource represents an interface for resources that is used by TestSuite
 type TestResource interface {
 	// cleanupResource cleans up the test resources created when setting up the resource
-	cleanupResource()
+	cleanupResource() error
 }
 
 func getTestNameStr(suite TestSuite, pattern testpatterns.TestPattern) string {
@@ -180,7 +189,7 @@ type genericVolumeTestResource struct {
 
 var _ TestResource = &genericVolumeTestResource{}
 
-func createGenericVolumeTestResource(driver TestDriver, config *PerTestConfig, pattern testpatterns.TestPattern) *genericVolumeTestResource {
+func createGenericVolumeTestResource(driver TestDriver, config *PerTestConfig, pattern testpatterns.TestPattern, testVolumeSizeRange volume.SizeRange) *genericVolumeTestResource {
 	r := genericVolumeTestResource{
 		driver:  driver,
 		config:  config,
@@ -213,7 +222,11 @@ func createGenericVolumeTestResource(driver TestDriver, config *PerTestConfig, p
 	case testpatterns.DynamicPV:
 		framework.Logf("Creating resource for dynamic PV")
 		if dDriver, ok := driver.(DynamicPVTestDriver); ok {
-			claimSize := dDriver.GetClaimSize()
+			var err error
+			driverVolumeSizeRange := dDriver.GetDriverInfo().SupportedSizeRange
+			claimSize, err := getSizeRangesIntersection(testVolumeSizeRange, driverVolumeSizeRange)
+			framework.ExpectNoError(err, "determine intersection of test size range %+v and driver size range %+v", testVolumeSizeRange, driverVolumeSizeRange)
+			framework.Logf("Using claimSize:%s, test suite supported size:%v, driver(%s) supported size:%v ", claimSize, testVolumeSizeRange, dDriver.GetDriverInfo().Name, testVolumeSizeRange)
 			r.sc = dDriver.GetDynamicProvisionStorageClass(r.config, pattern.FsType)
 
 			if pattern.BindingMode != "" {
@@ -224,7 +237,7 @@ func createGenericVolumeTestResource(driver TestDriver, config *PerTestConfig, p
 			}
 
 			ginkgo.By("creating a StorageClass " + r.sc.Name)
-			var err error
+
 			r.sc, err = cs.StorageV1().StorageClasses().Create(r.sc)
 			framework.ExpectNoError(err)
 
@@ -257,14 +270,14 @@ func createVolumeSource(pvcName string, readOnly bool) *v1.VolumeSource {
 }
 
 // cleanupResource cleans up genericVolumeTestResource
-func (r *genericVolumeTestResource) cleanupResource() {
+func (r *genericVolumeTestResource) cleanupResource() error {
 	f := r.config.Framework
-
+	var cleanUpErrs []error
 	if r.pvc != nil || r.pv != nil {
 		switch r.pattern.VolType {
 		case testpatterns.PreprovisionedPV:
 			ginkgo.By("Deleting pv and pvc")
-			if errs := framework.PVPVCCleanup(f.ClientSet, f.Namespace.Name, r.pv, r.pvc); len(errs) != 0 {
+			if errs := e2epv.PVPVCCleanup(f.ClientSet, f.Namespace.Name, r.pv, r.pvc); len(errs) != 0 {
 				framework.Failf("Failed to delete PVC or PV: %v", utilerrors.NewAggregate(errs))
 			}
 		case testpatterns.DynamicPV:
@@ -275,11 +288,16 @@ func (r *genericVolumeTestResource) cleanupResource() {
 					r.pv.Name, v1.PersistentVolumeReclaimDelete)
 			}
 			if r.pvc != nil {
-				err := framework.DeletePersistentVolumeClaim(f.ClientSet, r.pvc.Name, f.Namespace.Name)
-				framework.ExpectNoError(err, "Failed to delete PVC %v", r.pvc.Name)
+				err := e2epv.DeletePersistentVolumeClaim(f.ClientSet, r.pvc.Name, f.Namespace.Name)
+				if err != nil {
+					cleanUpErrs = append(cleanUpErrs, errors.Wrapf(err, "Failed to delete PVC %v", r.pvc.Name))
+				}
 				if r.pv != nil {
 					err = framework.WaitForPersistentVolumeDeleted(f.ClientSet, r.pv.Name, 5*time.Second, 5*time.Minute)
-					framework.ExpectNoError(err, "Persistent Volume %v not deleted by dynamic provisioner", r.pv.Name)
+					if err != nil {
+						cleanUpErrs = append(cleanUpErrs, errors.Wrapf(err,
+							"Persistent Volume %v not deleted by dynamic provisioner", r.pv.Name))
+					}
 				}
 			}
 		default:
@@ -289,13 +307,18 @@ func (r *genericVolumeTestResource) cleanupResource() {
 
 	if r.sc != nil {
 		ginkgo.By("Deleting sc")
-		deleteStorageClass(f.ClientSet, r.sc.Name)
+		if err := deleteStorageClass(f.ClientSet, r.sc.Name); err != nil {
+			cleanUpErrs = append(cleanUpErrs, errors.Wrapf(err, "Failed to delete StorageClass %v", r.sc.Name))
+		}
 	}
 
 	// Cleanup volume for pre-provisioned volume tests
 	if r.volume != nil {
-		r.volume.DeleteVolume()
+		if err := tryFunc(r.volume.DeleteVolume); err != nil {
+			cleanUpErrs = append(cleanUpErrs, errors.Wrap(err, "Failed to delete Volume"))
+		}
 	}
+	return apierrors.NewAggregate(cleanUpErrs)
 }
 
 func createPVCPV(
@@ -306,7 +329,7 @@ func createPVCPV(
 	volMode v1.PersistentVolumeMode,
 	accessModes []v1.PersistentVolumeAccessMode,
 ) (*v1.PersistentVolume, *v1.PersistentVolumeClaim) {
-	pvConfig := framework.PersistentVolumeConfig{
+	pvConfig := e2epv.PersistentVolumeConfig{
 		NamePrefix:       fmt.Sprintf("%s-", name),
 		StorageClassName: f.Namespace.Name,
 		PVSource:         *pvSource,
@@ -314,7 +337,7 @@ func createPVCPV(
 		AccessModes:      accessModes,
 	}
 
-	pvcConfig := framework.PersistentVolumeClaimConfig{
+	pvcConfig := e2epv.PersistentVolumeClaimConfig{
 		StorageClassName: &f.Namespace.Name,
 		AccessModes:      accessModes,
 	}
@@ -325,10 +348,10 @@ func createPVCPV(
 	}
 
 	framework.Logf("Creating PVC and PV")
-	pv, pvc, err := framework.CreatePVCPV(f.ClientSet, pvConfig, pvcConfig, f.Namespace.Name, false)
+	pv, pvc, err := e2epv.CreatePVCPV(f.ClientSet, pvConfig, pvcConfig, f.Namespace.Name, false)
 	framework.ExpectNoError(err, "PVC, PV creation failed")
 
-	err = framework.WaitOnPVandPVC(f.ClientSet, f.Namespace.Name, pv, pvc)
+	err = e2epv.WaitOnPVandPVC(f.ClientSet, f.Namespace.Name, pv, pvc)
 	framework.ExpectNoError(err, "PVC, PV failed to bind")
 
 	return pv, pvc
@@ -346,7 +369,7 @@ func createPVCPVFromDynamicProvisionSC(
 	ns := f.Namespace.Name
 
 	ginkgo.By("creating a claim")
-	pvcCfg := framework.PersistentVolumeClaimConfig{
+	pvcCfg := e2epv.PersistentVolumeClaimConfig{
 		NamePrefix:       name,
 		ClaimSize:        claimSize,
 		StorageClassName: &(sc.Name),
@@ -354,14 +377,14 @@ func createPVCPVFromDynamicProvisionSC(
 		VolumeMode:       &volMode,
 	}
 
-	pvc := framework.MakePersistentVolumeClaim(pvcCfg, ns)
+	pvc := e2epv.MakePersistentVolumeClaim(pvcCfg, ns)
 
 	var err error
-	pvc, err = framework.CreatePVC(cs, ns, pvc)
+	pvc, err = e2epv.CreatePVC(cs, ns, pvc)
 	framework.ExpectNoError(err)
 
 	if !isDelayedBinding(sc) {
-		err = framework.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, cs, pvc.Namespace, pvc.Name, framework.Poll, framework.ClaimProvisionTimeout)
+		err = e2epv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, cs, pvc.Namespace, pvc.Name, framework.Poll, framework.ClaimProvisionTimeout)
 		framework.ExpectNoError(err)
 	}
 
@@ -385,11 +408,12 @@ func isDelayedBinding(sc *storagev1.StorageClass) bool {
 }
 
 // deleteStorageClass deletes the passed in StorageClass and catches errors other than "Not Found"
-func deleteStorageClass(cs clientset.Interface, className string) {
+func deleteStorageClass(cs clientset.Interface, className string) error {
 	err := cs.StorageV1().StorageClasses().Delete(className, nil)
 	if err != nil && !apierrs.IsNotFound(err) {
-		framework.ExpectNoError(err)
+		return err
 	}
+	return nil
 }
 
 // convertTestConfig returns a framework test config with the
@@ -413,6 +437,55 @@ func convertTestConfig(in *PerTestConfig) volume.TestConfig {
 	}
 }
 
+// getSizeRangesIntersection takes two instances of storage size ranges and determines the
+// intersection of the intervals (if it exists) and return the minimum of the intersection
+// to be used as the claim size for the test.
+// if value not set, that means there's no minimum or maximum size limitation and we set default size for it.
+func getSizeRangesIntersection(first volume.SizeRange, second volume.SizeRange) (string, error) {
+	var firstMin, firstMax, secondMin, secondMax resource.Quantity
+	var err error
+
+	//if SizeRange is not set, assign a minimum or maximum size
+	if len(first.Min) == 0 {
+		first.Min = minValidSize
+	}
+	if len(first.Max) == 0 {
+		first.Max = maxValidSize
+	}
+	if len(second.Min) == 0 {
+		second.Min = minValidSize
+	}
+	if len(second.Max) == 0 {
+		second.Max = maxValidSize
+	}
+
+	if firstMin, err = resource.ParseQuantity(first.Min); err != nil {
+		return "", err
+	}
+	if firstMax, err = resource.ParseQuantity(first.Max); err != nil {
+		return "", err
+	}
+	if secondMin, err = resource.ParseQuantity(second.Min); err != nil {
+		return "", err
+	}
+	if secondMax, err = resource.ParseQuantity(second.Max); err != nil {
+		return "", err
+	}
+
+	interSectionStart := math.Max(float64(firstMin.Value()), float64(secondMin.Value()))
+	intersectionEnd := math.Min(float64(firstMax.Value()), float64(secondMax.Value()))
+
+	// the minimum of the intersection shall be returned as the claim size
+	var intersectionMin resource.Quantity
+
+	if intersectionEnd-interSectionStart >= 0 { //have intersection
+		intersectionMin = *resource.NewQuantity(int64(interSectionStart), "BinarySI") //convert value to BinarySI format. E.g. 5Gi
+		// return the minimum of the intersection as the claim size
+		return intersectionMin.String(), nil
+	}
+	return "", fmt.Errorf("intersection of size ranges %+v, %+v is null", first, second)
+}
+
 func getSnapshot(claimName string, ns, snapshotClassName string) *unstructured.Unstructured {
 	snapshot := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -423,10 +496,9 @@ func getSnapshot(claimName string, ns, snapshotClassName string) *unstructured.U
 				"namespace":    ns,
 			},
 			"spec": map[string]interface{}{
-				"snapshotClassName": snapshotClassName,
+				"volumeSnapshotClassName": snapshotClassName,
 				"source": map[string]interface{}{
-					"name": claimName,
-					"kind": "PersistentVolumeClaim",
+					"persistentVolumeClaimName": claimName,
 				},
 			},
 		},
@@ -474,7 +546,7 @@ func StartPodLogs(f *framework.Framework) func() {
 	return cancel
 }
 
-func getVolumeOpsFromMetricsForPlugin(ms metrics.Metrics, pluginName string) opCounts {
+func getVolumeOpsFromMetricsForPlugin(ms testutil.Metrics, pluginName string) opCounts {
 	totOps := opCounts{}
 
 	for method, samples := range ms {
@@ -518,7 +590,7 @@ func getVolumeOpCounts(c clientset.Interface, pluginName string) opCounts {
 
 	controllerMetrics, err := metricsGrabber.GrabFromControllerManager()
 	framework.ExpectNoError(err, "Error getting c-m metrics : %v", err)
-	totOps := getVolumeOpsFromMetricsForPlugin(metrics.Metrics(controllerMetrics), pluginName)
+	totOps := getVolumeOpsFromMetricsForPlugin(testutil.Metrics(controllerMetrics), pluginName)
 
 	framework.Logf("Node name not specified for getVolumeOpCounts, falling back to listing nodes from API Server")
 	nodes, err := c.CoreV1().Nodes().List(metav1.ListOptions{})
@@ -530,7 +602,7 @@ func getVolumeOpCounts(c clientset.Interface, pluginName string) opCounts {
 		for _, node := range nodes.Items {
 			nodeMetrics, err := metricsGrabber.GrabFromKubelet(node.GetName())
 			framework.ExpectNoError(err, "Error getting Kubelet %v metrics: %v", node.GetName(), err)
-			totOps = addOpCounts(totOps, getVolumeOpsFromMetricsForPlugin(metrics.Metrics(nodeMetrics), pluginName))
+			totOps = addOpCounts(totOps, getVolumeOpsFromMetricsForPlugin(testutil.Metrics(nodeMetrics), pluginName))
 		}
 	} else {
 		framework.Logf("Skipping operation metrics gathering from nodes in getVolumeOpCounts, greater than %v nodes", nodeLimit)
@@ -557,7 +629,8 @@ func addOpCounts(o1 opCounts, o2 opCounts) opCounts {
 func getMigrationVolumeOpCounts(cs clientset.Interface, pluginName string) (opCounts, opCounts) {
 	if len(pluginName) > 0 {
 		var migratedOps opCounts
-		csiName, err := csilib.GetCSINameFromInTreeName(pluginName)
+		l := csitrans.New()
+		csiName, err := l.GetCSINameFromInTreeName(pluginName)
 		if err != nil {
 			framework.Logf("Could not find CSI Name for in-tree plugin %v", pluginName)
 			migratedOps = opCounts{}
@@ -623,4 +696,18 @@ func skipVolTypePatterns(pattern testpatterns.TestPattern, driver TestDriver, sk
 	if supportsProvisioning && skipVolTypes[pattern.VolType] {
 		framework.Skipf("Driver supports dynamic provisioning, skipping %s pattern", pattern.VolType)
 	}
+}
+
+func tryFunc(f func()) error {
+	var err error
+	if f == nil {
+		return nil
+	}
+	defer func() {
+		if recoverError := recover(); recoverError != nil {
+			err = fmt.Errorf("%v", recoverError)
+		}
+	}()
+	f()
+	return err
 }

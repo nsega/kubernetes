@@ -31,6 +31,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
 	"k8s.io/kubernetes/test/e2e/storage/utils"
 )
 
@@ -107,16 +108,10 @@ var _ = utils.SIGDescribe("Storage Policy Based Volume Provisioning [Feature:vsp
 		tagPolicy = GetAndExpectStringEnvVar(SPBMTagPolicy)
 		framework.Logf("framework: %+v", f)
 		scParameters = make(map[string]string)
-		nodeList := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
-		if !(len(nodeList.Items) > 0) {
-			framework.Failf("Unable to find ready and schedulable Node")
-		}
+		_, err := e2enode.GetRandomReadySchedulableNode(f.ClientSet)
+		framework.ExpectNoError(err)
 		masternodes, _, err := e2enode.GetMasterAndWorkerNodes(client)
-		if err != nil {
-			framework.Logf("Unexpected error occurred: %v", err)
-		}
-		// TODO: write a wrapper for ExpectNoErrorWithOffset()
-		framework.ExpectNoErrorWithOffset(0, err)
+		framework.ExpectNoError(err)
 		gomega.Expect(masternodes).NotTo(gomega.BeEmpty())
 		masterNode = masternodes.List()[0]
 	})
@@ -285,14 +280,14 @@ func invokeValidPolicyTest(f *framework.Framework, client clientset.Interface, n
 	defer client.StorageV1().StorageClasses().Delete(storageclass.Name, nil)
 
 	ginkgo.By("Creating PVC using the Storage Class")
-	pvclaim, err := framework.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
+	pvclaim, err := e2epv.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
 	framework.ExpectNoError(err)
-	defer framework.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+	defer e2epv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
 
 	var pvclaims []*v1.PersistentVolumeClaim
 	pvclaims = append(pvclaims, pvclaim)
 	ginkgo.By("Waiting for claim to be in bound phase")
-	persistentvolumes, err := framework.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+	persistentvolumes, err := e2epv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
 	framework.ExpectNoError(err)
 
 	ginkgo.By("Creating pod to attach PV to the node")
@@ -317,12 +312,12 @@ func invokeInvalidPolicyTestNeg(client clientset.Interface, namespace string, sc
 	defer client.StorageV1().StorageClasses().Delete(storageclass.Name, nil)
 
 	ginkgo.By("Creating PVC using the Storage Class")
-	pvclaim, err := framework.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
+	pvclaim, err := e2epv.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
 	framework.ExpectNoError(err)
-	defer framework.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+	defer e2epv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
 
 	ginkgo.By("Waiting for claim to be in bound phase")
-	err = framework.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client, pvclaim.Namespace, pvclaim.Name, framework.Poll, 2*time.Minute)
+	err = e2epv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client, pvclaim.Namespace, pvclaim.Name, framework.Poll, 2*time.Minute)
 	framework.ExpectError(err)
 
 	eventList, err := client.CoreV1().Events(pvclaim.Namespace).List(metav1.ListOptions{})
@@ -336,19 +331,19 @@ func invokeStaleDummyVMTestWithStoragePolicy(client clientset.Interface, masterN
 	defer client.StorageV1().StorageClasses().Delete(storageclass.Name, nil)
 
 	ginkgo.By("Creating PVC using the Storage Class")
-	pvclaim, err := framework.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
+	pvclaim, err := e2epv.CreatePVC(client, namespace, getVSphereClaimSpecWithStorageClass(namespace, "2Gi", storageclass))
 	framework.ExpectNoError(err)
 
 	var pvclaims []*v1.PersistentVolumeClaim
 	pvclaims = append(pvclaims, pvclaim)
 	ginkgo.By("Expect claim to fail provisioning volume")
-	_, err = framework.WaitForPVClaimBoundPhase(client, pvclaims, 2*time.Minute)
+	_, err = e2epv.WaitForPVClaimBoundPhase(client, pvclaims, 2*time.Minute)
 	framework.ExpectError(err)
 
 	updatedClaim, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(pvclaim.Name, metav1.GetOptions{})
 	framework.ExpectNoError(err)
 	vmName := clusterName + "-dynamic-pvc-" + string(updatedClaim.UID)
-	framework.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+	e2epv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
 	// Wait for 6 minutes to let the vSphere Cloud Provider clean up routine delete the dummy VM
 	time.Sleep(6 * time.Minute)
 
