@@ -55,9 +55,10 @@ func NewCRIStatsProvider(
 	hostStatsProvider HostStatsProvider,
 	podAndContainerStatsFromCRI bool,
 	fallbackStatsProvider containerStatsProvider,
+	logger klog.Logger,
 ) *Provider {
 	return newStatsProvider(cadvisor, podManager, newCRIStatsProvider(cadvisor, resourceAnalyzer,
-		runtimeService, imageService, hostStatsProvider, podAndContainerStatsFromCRI, fallbackStatsProvider))
+		runtimeService, imageService, hostStatsProvider, podAndContainerStatsFromCRI, fallbackStatsProvider), logger)
 }
 
 // NewCadvisorStatsProvider returns a containerStatsProvider that provides both
@@ -70,8 +71,9 @@ func NewCadvisorStatsProvider(
 	statusProvider status.PodStatusProvider,
 	hostStatsProvider HostStatsProvider,
 	containerManager cm.ContainerManager,
+	logger klog.Logger,
 ) *Provider {
-	return newStatsProvider(cadvisor, podManager, newCadvisorStatsProvider(cadvisor, resourceAnalyzer, imageService, statusProvider, hostStatsProvider, containerManager))
+	return newStatsProvider(cadvisor, podManager, newCadvisorStatsProvider(cadvisor, resourceAnalyzer, imageService, statusProvider, hostStatsProvider, containerManager), logger)
 }
 
 // newStatsProvider returns a new Provider that provides node stats from
@@ -80,11 +82,13 @@ func newStatsProvider(
 	cadvisor cadvisor.Interface,
 	podManager PodManager,
 	containerStatsProvider containerStatsProvider,
+	logger klog.Logger,
 ) *Provider {
 	return &Provider{
 		cadvisor:               cadvisor,
 		podManager:             podManager,
 		containerStatsProvider: containerStatsProvider,
+		logger:                 logger,
 	}
 }
 
@@ -93,6 +97,7 @@ type Provider struct {
 	cadvisor   cadvisor.Interface
 	podManager PodManager
 	containerStatsProvider
+	logger klog.Logger
 }
 
 // containerStatsProvider is an interface that provides the stats of the
@@ -122,11 +127,8 @@ func (p *Provider) GetCgroupStats(cgroupName string, updateStats bool) (*statsap
 		}
 		return nil, nil, fmt.Errorf("failed to get cgroup stats for %q: %v", cgroupName, err)
 	}
-	// Use klog.TODO() because we currently do not have a proper logger to pass in.
-	// Replace this with an appropriate logger when refactoring this function to accept a context parameter.
-	logger := klog.TODO()
 	// Rootfs and imagefs doesn't make sense for raw cgroup.
-	s := cadvisorInfoToContainerStats(logger, cgroupName, info, nil, nil)
+	s := cadvisorInfoToContainerStats(p.logger, cgroupName, info, nil, nil)
 	n := cadvisorInfoToNetworkStats(info)
 	return s, n, nil
 }

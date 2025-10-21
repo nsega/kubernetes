@@ -1178,7 +1178,7 @@ func (kl *Kubelet) removeOrphanedPodStatuses(pods []*v1.Pod, mirrorPods []*v1.Po
 	for _, pod := range mirrorPods {
 		podUIDs[pod.UID] = true
 	}
-	kl.statusManager.RemoveOrphanedStatuses(klog.TODO(), podUIDs)
+	kl.statusManager.RemoveOrphanedStatuses(klog.Background(), podUIDs)
 }
 
 // HandlePodCleanups performs a series of cleanup work, including terminating
@@ -2108,9 +2108,9 @@ func (kl *Kubelet) convertStatusToAPIStatus(pod *v1.Pod, podStatus *kubecontaine
 // convertToAPIContainerStatuses converts the given internal container
 // statuses into API container statuses.
 func (kl *Kubelet) convertToAPIContainerStatuses(pod *v1.Pod, podStatus *kubecontainer.PodStatus, previousStatus []v1.ContainerStatus, containers []v1.Container, hasInitContainers, isInitContainer bool) []v1.ContainerStatus {
-	// Use klog.TODO() because we currently do not have a proper logger to pass in.
-	// This should be replaced with an appropriate logger when refactoring this function to accept a logger parameter.
-	logger := klog.TODO()
+	// Use klog.Background() for logging. In the future, this function could be refactored to accept a context parameter
+	// and use klog.FromContext(ctx) instead.
+	logger := klog.Background()
 	convertContainerStatus := func(cs *kubecontainer.Status, oldStatus *v1.ContainerStatus) *v1.ContainerStatus {
 		cid := cs.ID.String()
 		status := &v1.ContainerStatus{

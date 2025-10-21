@@ -32,6 +32,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
+	"k8s.io/klog/v2"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 	kubelettypes "k8s.io/kubelet/pkg/types"
 	"k8s.io/kubernetes/pkg/features"
@@ -277,7 +278,7 @@ func TestCadvisorListPodStats(t *testing.T) {
 
 	resourceAnalyzer := &fakeResourceAnalyzer{podVolumeStats: volumeStats}
 
-	p := NewCadvisorStatsProvider(mockCadvisor, resourceAnalyzer, nil, mockRuntime, mockStatus, NewFakeHostStatsProvider(&containertest.FakeOS{}), nil)
+	p := NewCadvisorStatsProvider(mockCadvisor, resourceAnalyzer, nil, mockRuntime, mockStatus, NewFakeHostStatsProvider(&containertest.FakeOS{}), nil, klog.Background())
 	pods, err := p.ListPodStats(ctx)
 	assert.NoError(t, err)
 
@@ -420,7 +421,7 @@ func TestCadvisorPodCPUAndMemoryStats(t *testing.T) {
 	mockCM := cmtesting.NewMockContainerManager(t)
 	mockCM.EXPECT().NewPodContainerManager().Return(mockPCM)
 
-	p := NewCadvisorStatsProvider(mockCadvisor, &fakeResourceAnalyzer{}, nil, nil, nil, NewFakeHostStatsProvider(&containertest.FakeOS{}), mockCM)
+	p := NewCadvisorStatsProvider(mockCadvisor, &fakeResourceAnalyzer{}, nil, nil, nil, NewFakeHostStatsProvider(&containertest.FakeOS{}), mockCM, klog.Background())
 
 	ps, err := p.PodCPUAndMemoryStats(tCtx, pod, nil)
 	require.NoError(t, err)
@@ -996,7 +997,7 @@ func TestCadvisorListPodStatsWhenContainerLogFound(t *testing.T) {
 
 	resourceAnalyzer := &fakeResourceAnalyzer{podVolumeStats: volumeStats}
 
-	p := NewCadvisorStatsProvider(mockCadvisor, resourceAnalyzer, nil, mockRuntime, mockStatus, NewFakeHostStatsProviderWithData(fakeStats, fakeOS), nil)
+	p := NewCadvisorStatsProvider(mockCadvisor, resourceAnalyzer, nil, mockRuntime, mockStatus, NewFakeHostStatsProviderWithData(fakeStats, fakeOS), nil, klog.Background())
 	pods, err := p.ListPodStats(ctx)
 	assert.NoError(t, err)
 

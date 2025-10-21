@@ -246,6 +246,7 @@ func TestCRIListPodStats(t *testing.T) {
 		NewFakeHostStatsProviderWithData(fakeStats, fakeOS),
 		false,
 		fakeContainerStatsProvider{},
+		klog.Background(),
 	)
 
 	stats, err := provider.ListPodStats(tCtx)

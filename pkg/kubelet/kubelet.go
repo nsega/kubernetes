@@ -819,6 +819,7 @@ func NewMainKubelet(ctx context.Context,
 		return getEtcHostsPath(klet.getPodDir(podUID))
 	}, podLogsDirectory)
 
+	logger := klog.FromContext(ctx)
 	cadvisorStatsProvider := stats.NewCadvisorStatsProvider(
 		klet.cadvisor,
 		klet.resourceAnalyzer,
@@ -827,6 +828,7 @@ func NewMainKubelet(ctx context.Context,
 		klet.statusManager,
 		hostStatsProvider,
 		kubeDeps.ContainerManager,
+		logger,
 	)
 	if kubeDeps.useLegacyCadvisorStats {
 		klet.StatsProvider = cadvisorStatsProvider
@@ -840,6 +842,7 @@ func NewMainKubelet(ctx context.Context,
 			hostStatsProvider,
 			utilfeature.DefaultFeatureGate.Enabled(features.PodAndContainerStatsFromCRI),
 			cadvisorStatsProvider,
+			klog.FromContext(ctx),
 		)
 	}
 
